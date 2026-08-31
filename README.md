@@ -1,6 +1,5 @@
 Scanread — WEB APP
 
-This is a normal local web app. It is NOT a Chrome extension.
 
 To run open:
    http://localhost:8000
