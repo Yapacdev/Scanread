@@ -2,7 +2,7 @@ Scanread — WEB APP
 
 
 To run open:
-   http://localhost:8000
+   [http://localhost:8000](https://scanread.netlify.app/)
 
 
 FEATURES
