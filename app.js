@@ -1,0 +1,187 @@
+import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.54/pdf.min.mjs";
+pdfjsLib.GlobalWorkerOptions.workerSrc="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/5.4.54/pdf.worker.min.mjs";
+
+const $=id=>document.getElementById(id);
+let pdf=null, pageNum=1, scale=1, bookKey=null, state=null, currentText="", voices=[];
+let speechQueue=[], speechIndex=0, speaking=false;
+let userPickedVoice=false;
+
+// Prefer higher-quality voice engines (Google/Natural/Neural) over robotic-sounding system defaults.
+function voiceQuality(v){
+ const n=v.name.toLowerCase();
+ if(n.includes("natural")||n.includes("neural")||n.includes("google")||n.includes("online"))return 3;
+ if(n.includes("premium")||n.includes("enhanced")||n.includes("plus"))return 2;
+ if(n.includes("desktop")||n.includes("compact")||n.includes("espeak")||n.includes("mobile"))return 0;
+ return 1;
+}
+function pickVoiceIndex(langCode){
+ if(!voices.length)return -1;
+ const matches=voices.map((v,i)=>({v,i})).filter(o=>o.v.lang.toLowerCase().startsWith(langCode));
+ const pool=matches.length?matches:voices.map((v,i)=>({v,i}));
+ pool.sort((a,b)=>voiceQuality(b.v)-voiceQuality(a.v));
+ return pool[0].i;
+}
+function applyDefaultVoice(){
+ if(userPickedVoice||!voices.length)return;
+ const idx=pickVoiceIndex("en");
+ if(idx>=0)$("voiceSelect").value=idx;
+}
+
+const storage={
+ get(k){try{return JSON.parse(localStorage.getItem(k))}catch{return null}},
+ set(k,v){localStorage.setItem(k,JSON.stringify(v))},
+ del(k){localStorage.removeItem(k)}
+};
+
+function makeKey(file){return "book:"+file.name+":"+file.size+":"+file.lastModified}
+function setTheme(t){document.body.classList.remove("dark","sepia");if(t!=="light")document.body.classList.add(t);$("themeSelect").value=t;storage.set("theme",t)}
+setTheme(storage.get("theme")||"light");
+$("themeSelect").onchange=e=>setTheme(e.target.value);
+$("themeBtn").onclick=()=>{const t=document.body.classList.contains("dark")?"light":"dark";setTheme(t)};
+$("fontSize").oninput=e=>document.documentElement.style.setProperty("--book-font",e.target.value+"px");
+
+function loadVoices(){
+ voices=speechSynthesis.getVoices();$("voiceSelect").innerHTML="";
+ voices.forEach((v,i)=>{const o=document.createElement("option");o.value=i;o.textContent=`${v.name} — ${v.lang}`;$("voiceSelect").appendChild(o)});
+ applyDefaultVoice(); // voice list often loads async
+}
+loadVoices();speechSynthesis.onvoiceschanged=loadVoices;
+$("voiceSelect").onchange=()=>{userPickedVoice=true};
+
+$("openBtn").onclick=()=>$("fileInput").click();$("emptyOpen").onclick=()=>$("fileInput").click();
+
+$("fileInput").onchange=async e=>{
+ const file=e.target.files[0];if(!file)return;
+ try{
+  stopSpeech();userPickedVoice=false;applyDefaultVoice();$("emptyState").classList.add("hidden");$("pdfViewport").classList.remove("hidden");
+  $("bookName").textContent=file.name;$("bookMeta").textContent=`${(file.size/1024/1024).toFixed(1)} MB`;
+  bookKey=makeKey(file);state=storage.get(bookKey)||{page:1,bookmarks:[]};
+  pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  pageNum=Math.min(state.page||1,pdf.numPages);
+  $("infoText").textContent=`${file.name}\\n\\n${pdf.numPages} pages\\n\\nYour progress and bookmarks are saved in this browser.`;
+  await render();renderBookmarks();
+ }catch(err){alert("Could not open this PDF. "+err.message)}
+};
+
+async function extractPageText(n){
+ const p=await pdf.getPage(n), c=await p.getTextContent();
+ return c.items.map(x=>x.str).join(" ").replace(/\s+/g," ").trim();
+}
+async function render(){
+ if(!pdf)return;
+ const p=await pdf.getPage(pageNum);
+ const viewport=p.getViewport({scale});
+ const canvas=document.createElement("canvas"),ctx=canvas.getContext("2d");
+ canvas.width=viewport.width;canvas.height=viewport.height;
+ const textLayerDiv=document.createElement("div");
+ textLayerDiv.className="textLayer";
+ textLayerDiv.style.width=viewport.width+"px";
+ textLayerDiv.style.height=viewport.height+"px";
+ const container=$("pageContainer");
+ container.innerHTML="";
+ container.style.width=viewport.width+"px";
+ container.style.height=viewport.height+"px";
+ container.appendChild(canvas);
+ container.appendChild(textLayerDiv);
+ await p.render({canvasContext:ctx,viewport}).promise;
+ const textContent=await p.getTextContent();
+ currentText=textContent.items.map(x=>x.str).join(" ").replace(/\s+/g," ").trim();
+ buildTextLayer(textContent,viewport,textLayerDiv);
+ $("pageLabel").textContent=`Page ${pageNum} / ${pdf.numPages}`;
+ $("zoomLabel").textContent=Math.round(scale*100)+"%";
+ state.page=pageNum;storage.set(bookKey,state);updateProgress();
+}
+function updateProgress(){if(!pdf)return;const pct=Math.round(pageNum/pdf.numPages*100);$("progressBar").style.width=pct+"%";$("progressText").textContent=pct+"%";}
+
+// Build an invisible, selectable text overlay positioned directly on top of each
+// rendered glyph, using PDF.js's stable Util.transform matrix helper (avoids the
+// newer, less reliable pdfjsLib.TextLayer class some browsers fail to render).
+function buildTextLayer(textContent,viewport,container){
+ container.innerHTML="";
+ container.style.setProperty("--scale-factor",viewport.scale);
+ textContent.items.forEach(item=>{
+  if(!item.str)return;
+  const tx=pdfjsLib.Util.transform(viewport.transform,item.transform);
+  const angle=Math.atan2(tx[1],tx[0]);
+  const fontSize=Math.hypot(tx[2],tx[3]);
+  if(!fontSize)return;
+  const span=document.createElement("span");
+  span.textContent=item.str;
+  span.style.left=tx[4]+"px";
+  span.style.top=(tx[5]-fontSize)+"px";
+  span.style.fontSize=fontSize+"px";
+  if(angle)span.style.transform=`rotate(${angle}rad)`;
+  container.appendChild(span);
+ });
+}
+
+$("prevPage").onclick=async()=>{if(pdf&&pageNum>1){stopSpeech();pageNum--;await render()}}
+$("nextPage").onclick=async()=>{if(pdf&&pageNum<pdf.numPages){stopSpeech();pageNum++;await render()}}
+$("zoomIn").onclick=async()=>{if(pdf){scale=Math.min(2.2,scale+.1);await render()}}
+$("zoomOut").onclick=async()=>{if(pdf){scale=Math.max(.6,scale-.1);await render()}}
+$("resumeBtn").onclick=async()=>{if(pdf){pageNum=state.page||1;await render()}}
+$("addBookmark").onclick=()=>{if(!pdf)return;state.bookmarks.unshift({id:Date.now(),page:pageNum,label:`Page ${pageNum}`});state.bookmarks=state.bookmarks.slice(0,50);storage.set(bookKey,state);renderBookmarks()}
+function renderBookmarks(){
+ const el=$("bookmarks");el.innerHTML="";
+ if(!state?.bookmarks?.length){el.className="list empty";el.textContent="No bookmarks yet.";return}
+ el.className="list";state.bookmarks.forEach((b,i)=>{const d=document.createElement("div");d.className="bm";d.innerHTML=`<button>🔖 ${b.label}</button><button>✕</button>`;d.children[0].onclick=async()=>{stopSpeech();pageNum=b.page;await render()};d.children[1].onclick=()=>{state.bookmarks.splice(i,1);storage.set(bookKey,state);renderBookmarks()};el.appendChild(d)})
+}
+
+async function readPage(){startReading(currentText,"No text found on this page.")}
+function startReading(text,emptyMsg){
+ if(!text){$("speechStatus").textContent=emptyMsg||"No text to read.";return}
+ stopSpeech();
+ speechQueue=text.match(/[^.!?]+[.!?]+|[^.!?]+$/g)||[text];
+ speechIndex=0;speaking=true;speakNext();
+}
+function speakNext(){
+ if(!speaking||speechIndex>=speechQueue.length){speaking=false;$("speechStatus").textContent="Finished";return}
+ const text=speechQueue[speechIndex++].trim();if(!text)return speakNext();
+ const u=new SpeechSynthesisUtterance(text),v=voices[parseInt($("voiceSelect").value||"0")];
+ if(v){u.voice=v;u.lang=v.lang}u.rate=parseFloat($("rate").value);
+ u.onstart=()=>{$("speechStatus").textContent=`🔊 Reading sentence ${speechIndex}/${speechQueue.length}`};
+ u.onend=speakNext;u.onerror=()=>{speaking=false;$("speechStatus").textContent="Speech error"};
+ speechSynthesis.speak(u);
+}
+$("readPage").onclick=readPage;
+$("readSelection").onclick=()=>{
+ const text=(window.getSelection()?.toString()||"").trim();
+ startReading(text,"Select some text on the page first.");
+};
+document.addEventListener("selectionchange",updateSelectionButton);
+function updateSelectionButton(){
+ const sel=window.getSelection();
+ const text=(sel&&sel.toString().trim())||"";
+ const inPage=sel&&sel.anchorNode&&$("pageContainer").contains(sel.anchorNode);
+ const btn=$("readSelection");
+ if(text&&inPage){
+  btn.disabled=false;
+  const words=text.split(/\s+/).length;
+  btn.textContent=`▶ Read selection (${words} word${words===1?"":"s"})`;
+ }else{
+  btn.disabled=true;
+  btn.textContent="▶ Read selection";
+ }
+}
+$("pause").onclick=()=>speechSynthesis.paused?speechSynthesis.resume():speechSynthesis.pause();
+$("stop").onclick=stopSpeech;
+function stopSpeech(){speaking=false;speechQueue=[];speechIndex=0;speechSynthesis.cancel();$("speechStatus").textContent="Ready"}
+
+$("searchBtn").onclick=()=>$("searchPanel").classList.toggle("hidden");
+let searchResults=[],searchIndex=0;
+$("searchInput").onkeydown=async e=>{if(e.key==="Enter")await search()};
+async function search(){
+ if(!pdf)return;const q=$("searchInput").value.trim().toLowerCase();if(!q)return;
+ searchResults=[];
+ for(let i=1;i<=pdf.numPages;i++){const t=await extractPageText(i);if(t.toLowerCase().includes(q))searchResults.push(i)}
+ searchIndex=0;$("searchCount").textContent=searchResults.length?`${searchResults.length} page(s)`:"No results";
+ if(searchResults.length){pageNum=searchResults[0];await render()}
+}
+$("searchNext").onclick=async()=>{if(searchResults.length){searchIndex=(searchIndex+1)%searchResults.length;pageNum=searchResults[searchIndex];await render()}}
+$("searchPrev").onclick=async()=>{if(searchResults.length){searchIndex=(searchIndex-1+searchResults.length)%searchResults.length;pageNum=searchResults[searchIndex];await render()}}
+
+document.querySelectorAll(".tab").forEach(t=>t.onclick=()=>{
+ document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));t.classList.add("active");
+ $("readTab").classList.toggle("hidden",t.dataset.tab!=="read");$("infoTab").classList.toggle("hidden",t.dataset.tab!=="info");
+});
+window.addEventListener("beforeunload",()=>{if(bookKey&&state){state.page=pageNum;storage.set(bookKey,state)}});
