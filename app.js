@@ -22,10 +22,48 @@ function pickVoiceIndex(langCode){
  return pool[0].i;
 }
 function applyDefaultVoice(){
+ if(!hasEnglishSystemVoice())ensureFallbackVoice(); // download a bundled English voice if the system has none
  if(userPickedVoice||!voices.length)return;
  const idx=pickVoiceIndex("en");
  if(idx>=0)$("voiceSelect").value=idx;
 }
+function hasEnglishSystemVoice(){return voices.some(v=>v.lang.toLowerCase().startsWith("en"))}
+
+// --- Offline English fallback voice ---
+// Only used when the OS/browser genuinely has no English voice at all. Loads a small,
+// self-contained eSpeak-based engine (mespeak.js) so English reading works with zero
+// install and no dependency on system voices. Robotic-sounding, but always available.
+let fallbackReady=false, fallbackLoading=false;
+const MESPEAK_BASE="https://cdn.jsdelivr.net/gh/btopro/mespeak@master/";
+function withTimeout(promise,ms,msg){
+ return Promise.race([promise,new Promise((_,rej)=>setTimeout(()=>rej(new Error(msg||"Timed out")),ms))]);
+}
+function loadScript(src){
+ return new Promise((res,rej)=>{
+  const s=document.createElement("script");
+  s.src=src;s.onload=()=>res();s.onerror=()=>rej(new Error("Failed to load "+src));
+  document.head.appendChild(s);
+ });
+}
+async function ensureFallbackVoice(){
+ if(fallbackReady||fallbackLoading)return;
+ fallbackLoading=true;
+ try{
+  await withTimeout(loadScript(MESPEAK_BASE+"mespeak.js"),10000,"Offline voice engine failed to load");
+  await withTimeout(new Promise((res,rej)=>{
+   window.meSpeak.loadConfig(MESPEAK_BASE+"mespeak_config.json",()=>res());
+   setTimeout(()=>rej(new Error("Config load timed out")),9000);
+  }),9500);
+  await withTimeout(new Promise((res,rej)=>{
+   window.meSpeak.loadVoice(MESPEAK_BASE+"voices/en/en-us.json",(ok,info)=>ok?res():rej(new Error(info||"Voice load failed")));
+  }),9500);
+  fallbackReady=true;
+  $("speechStatus").textContent="Using a built-in offline English voice (no English system voice was found).";
+ }catch(err){
+  console.warn("Offline English voice unavailable:",err);
+ }finally{fallbackLoading=false}
+}
+function useFallbackTTS(){return fallbackReady&&!userPickedVoice&&!hasEnglishSystemVoice()}
 
 const storage={
  get(k){try{return JSON.parse(localStorage.getItem(k))}catch{return null}},
@@ -59,6 +97,7 @@ $("fileInput").onchange=async e=>{
   pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
   pageNum=Math.min(state.page||1,pdf.numPages);
   $("infoText").textContent=`${file.name}\\n\\n${pdf.numPages} pages\\n\\nYour progress and bookmarks are saved in this browser.`;
+  buildThumbStrip();
   await render();renderBookmarks();
  }catch(err){alert("Could not open this PDF. "+err.message)}
 };
@@ -89,9 +128,57 @@ async function render(){
  buildTextLayer(textContent,viewport,textLayerDiv);
  $("pageLabel").textContent=`Page ${pageNum} / ${pdf.numPages}`;
  $("zoomLabel").textContent=Math.round(scale*100)+"%";
- state.page=pageNum;storage.set(bookKey,state);updateProgress();
+ state.page=pageNum;storage.set(bookKey,state);updateProgress();updateActiveThumb();
 }
 function updateProgress(){if(!pdf)return;const pct=Math.round(pageNum/pdf.numPages*100);$("progressBar").style.width=pct+"%";$("progressText").textContent=pct+"%";}
+
+// --- Thumbnail filmstrip ---
+// Renders a scrollable row of small page previews below the reader. Thumbnails are
+// rendered lazily via IntersectionObserver so opening a huge PDF doesn't render
+// hundreds of pages up front — only the ones actually scrolled into view.
+let thumbObserver=null;
+function buildThumbStrip(){
+ const strip=$("thumbStrip");
+ strip.innerHTML="";
+ strip.classList.remove("hidden");
+ if(thumbObserver)thumbObserver.disconnect();
+ thumbObserver=new IntersectionObserver(onThumbVisible,{root:strip,rootMargin:"300px",threshold:.01});
+ for(let n=1;n<=pdf.numPages;n++){
+  const thumb=document.createElement("div");
+  thumb.className="thumb"+(n===pageNum?" active":"");
+  thumb.dataset.page=n;
+  thumb.innerHTML=`<div class="thumb-placeholder"></div><div class="thumb-num">${n}</div>`;
+  thumb.onclick=async()=>{if(pdf&&n!==pageNum){stopSpeech();pageNum=n;await render()}};
+  strip.appendChild(thumb);
+  thumbObserver.observe(thumb);
+ }
+}
+async function onThumbVisible(entries){
+ for(const entry of entries){
+  if(!entry.isIntersecting)continue;
+  const el=entry.target;
+  thumbObserver.unobserve(el);
+  const n=parseInt(el.dataset.page);
+  try{
+   const p=await pdf.getPage(n);
+   const natural=p.getViewport({scale:1});
+   const thumbScale=60/natural.width;
+   const viewport=p.getViewport({scale:thumbScale});
+   const canvas=document.createElement("canvas");
+   canvas.width=viewport.width;canvas.height=viewport.height;
+   await p.render({canvasContext:canvas.getContext("2d"),viewport}).promise;
+   const placeholder=el.querySelector(".thumb-placeholder");
+   if(placeholder)placeholder.replaceWith(canvas);
+  }catch(err){console.warn("Thumbnail render failed for page",n,err)}
+ }
+}
+function updateActiveThumb(){
+ const strip=$("thumbStrip");
+ if(!strip)return;
+ strip.querySelectorAll(".thumb").forEach(t=>t.classList.toggle("active",parseInt(t.dataset.page)===pageNum));
+ const active=strip.querySelector(".thumb.active");
+ if(active)active.scrollIntoView({behavior:"smooth",inline:"center",block:"nearest"});
+}
 
 // Build an invisible, selectable text overlay positioned directly on top of each
 // rendered glyph, using PDF.js's stable Util.transform matrix helper (avoids the
@@ -132,7 +219,15 @@ function startReading(text,emptyMsg){
  if(!text){$("speechStatus").textContent=emptyMsg||"No text to read.";return}
  stopSpeech();
  speechQueue=text.match(/[^.!?]+[.!?]+|[^.!?]+$/g)||[text];
- speechIndex=0;speaking=true;speakNext();
+ speechIndex=0;speaking=true;
+ useFallbackTTS()?speakNextFallback():speakNext();
+}
+function speakNextFallback(){
+ if(!speaking||speechIndex>=speechQueue.length){speaking=false;$("speechStatus").textContent="Finished";return}
+ const text=speechQueue[speechIndex++].trim();if(!text)return speakNextFallback();
+ $("speechStatus").textContent=`🔊 Reading sentence ${speechIndex}/${speechQueue.length} (offline voice)`;
+ const wpm=Math.max(80,Math.min(400,Math.round(175*parseFloat($("rate").value||"1"))));
+ window.meSpeak.speak(text,{speed:wpm},()=>{if(speaking)speakNextFallback()});
 }
 function speakNext(){
  if(!speaking||speechIndex>=speechQueue.length){speaking=false;$("speechStatus").textContent="Finished";return}
@@ -163,9 +258,12 @@ function updateSelectionButton(){
   btn.textContent="▶ Read selection";
  }
 }
-$("pause").onclick=()=>speechSynthesis.paused?speechSynthesis.resume():speechSynthesis.pause();
+$("pause").onclick=()=>{
+ if(useFallbackTTS()){$("speechStatus").textContent="Pause isn't available with the offline voice — use Stop instead.";return}
+ speechSynthesis.paused?speechSynthesis.resume():speechSynthesis.pause();
+};
 $("stop").onclick=stopSpeech;
-function stopSpeech(){speaking=false;speechQueue=[];speechIndex=0;speechSynthesis.cancel();$("speechStatus").textContent="Ready"}
+function stopSpeech(){speaking=false;speechQueue=[];speechIndex=0;speechSynthesis.cancel();if(window.meSpeak)window.meSpeak.stop();$("speechStatus").textContent="Ready"}
 
 $("searchBtn").onclick=()=>$("searchPanel").classList.toggle("hidden");
 let searchResults=[],searchIndex=0;
