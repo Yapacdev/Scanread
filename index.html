@@ -5,20 +5,20 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Scanread — Your Personal PDF Reader</title>
 <meta name="description" content="Scanread is a free, private PDF reader for your browser. Read PDFs with page navigation, search, bookmarks, and reading progress that's remembered automatically — plus a built-in text-to-speech reader that can read your PDF aloud, including just the passages you select.">
-<link rel="canonical" href="https://YOUR-DOMAIN-HERE/">
- 
+<link rel="canonical" href="https://scanread.netlify.app/">
+
 <!-- Open Graph / social previews -->
 <meta property="og:type" content="website">
 <meta property="og:title" content="Scanread — Your Personal PDF Reader">
 <meta property="og:description" content="A free, private PDF reader with bookmarks, search, reading progress, and text-to-speech — read your PDFs, or have them read to you.">
-<meta property="og:url" content="https://YOUR-DOMAIN-HERE/">
-<meta property="og:image" content="https://YOUR-DOMAIN-HERE/icon2.png">
- 
+<meta property="og:url" content="https://scanread.netlify.app/">
+<meta property="og:image" content="https://scanread.netlify.app/icon2.png">
+
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="Scanread — Your Personal PDF Reader">
 <meta name="twitter:description" content="A free, private PDF reader with bookmarks, search, reading progress, and text-to-speech.">
-<meta name="twitter:image" content="https://YOUR-DOMAIN-HERE/icon2.png">
- 
+<meta name="twitter:image" content="https://scanread.netlify.app/icon2.png">
+
 <meta name="theme-color" content="#4f7cff">
 <link rel="stylesheet" href="styles.css">
 <link rel="icon" type="image/png" href="icon.png">
@@ -33,13 +33,13 @@
     <button id="themeBtn" title="Theme">🌙</button>
   </div>
 </header>
- 
+
 <div id="searchPanel" class="search-panel hidden">
   <input id="searchInput" placeholder="Search in this book…">
   <span id="searchCount"></span>
   <button id="searchPrev">↑</button><button id="searchNext">↓</button>
 </div>
- 
+
 <main>
   <aside class="sidebar">
     <section class="book-card">
@@ -50,19 +50,19 @@
       <div class="muted" id="progressText">0%</div>
       <button id="resumeBtn" class="resume">▶ Continue reading</button>
     </section>
- 
+
     <section>
       <div class="section-title">BOOKMARKS <button id="addBookmark" title="Bookmark current page">＋</button></div>
       <div id="bookmarks" class="list empty">No bookmarks yet.</div>
     </section>
- 
+
     <section>
       <div class="section-title">READING</div>
       <div class="setting"><span>Theme</span><select id="themeSelect"><option value="light">Light</option><option value="sepia">Sepia</option><option value="dark">Dark</option></select></div>
       <div class="setting"><span>Font size</span><input id="fontSize" type="range" min="14" max="25" value="18"></div>
     </section>
   </aside>
- 
+
   <section class="reader">
     <div class="reader-toolbar">
       <button id="prevPage">←</button>
@@ -71,14 +71,14 @@
       <span class="spacer"></span>
       <button id="zoomOut">−</button><span id="zoomLabel">100%</span><button id="zoomIn">＋</button>
     </div>
- 
+
     <div id="emptyState" class="empty-state">
       <div class="big">📖</div>
       <h1>Start reading</h1>
-      <p>Load a PDF and Book Companion will remember where you stopped.</p>
+      <p>Load a PDF and Scanread will remember where you stopped.</p>
       <button id="emptyOpen" class="primary large">Open a PDF</button>
     </div>
- 
+
     <div id="pdfViewport" class="pdf-viewport hidden">
       <div id="pageContainer" class="page-container"></div>
     </div>

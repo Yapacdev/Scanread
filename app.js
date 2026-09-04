@@ -124,11 +124,11 @@ async function render(){
  container.appendChild(textLayerDiv);
  await p.render({canvasContext:ctx,viewport}).promise;
  const textContent=await p.getTextContent();
- currentText=textContent.items.map(x=>x.str).join(" ").replace(/\s+/g," ").trim();
- buildTextLayer(textContent,viewport,textLayerDiv);
+ buildTextLayer(textContent,viewport,textLayerDiv); // also sets currentText & pageWords
  $("pageLabel").textContent=`Page ${pageNum} / ${pdf.numPages}`;
  $("zoomLabel").textContent=Math.round(scale*100)+"%";
  state.page=pageNum;storage.set(bookKey,state);updateProgress();updateActiveThumb();
+ if(speaking&&activeRange&&lastHighlightIdx>=0)highlightWordWindow(lastHighlightIdx); // re-attach highlight to freshly rebuilt spans (e.g. after zoom)
 }
 function updateProgress(){if(!pdf)return;const pct=Math.round(pageNum/pdf.numPages*100);$("progressBar").style.width=pct+"%";$("progressText").textContent=pct+"%";}
 
@@ -183,23 +183,56 @@ function updateActiveThumb(){
 // Build an invisible, selectable text overlay positioned directly on top of each
 // rendered glyph, using PDF.js's stable Util.transform matrix helper (avoids the
 // newer, less reliable pdfjsLib.TextLayer class some browsers fail to render).
+// One span per WORD (not per PDF text chunk) so the voice reader can highlight
+// exactly the word being spoken, right on top of the canvas.
+const measureCtx=document.createElement("canvas").getContext("2d");
+let pageWords=[]; // {word,span,start,end} — start/end are offsets into currentText
 function buildTextLayer(textContent,viewport,container){
  container.innerHTML="";
  container.style.setProperty("--scale-factor",viewport.scale);
+ pageWords=[];
+ let text="";
  textContent.items.forEach(item=>{
   if(!item.str)return;
   const tx=pdfjsLib.Util.transform(viewport.transform,item.transform);
   const angle=Math.atan2(tx[1],tx[0]);
   const fontSize=Math.hypot(tx[2],tx[3]);
   if(!fontSize)return;
-  const span=document.createElement("span");
-  span.textContent=item.str;
-  span.style.left=tx[4]+"px";
-  span.style.top=(tx[5]-fontSize)+"px";
-  span.style.fontSize=fontSize+"px";
-  if(angle)span.style.transform=`rotate(${angle}rad)`;
-  container.appendChild(span);
+  measureCtx.font=`${fontSize}px sans-serif`;
+  const cos=Math.cos(angle),sin=Math.sin(angle);
+  let advance=0;
+  const tokens=item.str.match(/\S+|\s+/g)||[];
+  tokens.forEach(tok=>{
+   const w=measureCtx.measureText(tok).width;
+   if(/\S/.test(tok)){
+    const span=document.createElement("span");
+    span.textContent=tok;
+    span.style.left=(tx[4]+advance*cos)+"px";
+    span.style.top=((tx[5]-fontSize)+advance*sin)+"px";
+    span.style.fontSize=fontSize+"px";
+    if(angle)span.style.transform=`rotate(${angle}rad)`;
+    container.appendChild(span);
+    if(text)text+=" ";
+    const start=text.length;
+    text+=tok;
+    pageWords.push({word:tok,span,start,end:start+tok.length});
+   }
+   advance+=w;
+  });
  });
+ currentText=text;
+}
+// Bundles a list of {word,span} into reading text + per-word offsets, so speech
+// playback and on-canvas highlighting always stay in sync with each other.
+function makeReadingSet(words){
+ let text="";
+ const list=words.map(w=>{
+  if(text)text+=" ";
+  const start=text.length;
+  text+=w.word;
+  return {word:w.word,span:w.span,start,end:start+w.word.length};
+ });
+ return {text,words:list};
 }
 
 $("prevPage").onclick=async()=>{if(pdf&&pageNum>1){stopSpeech();pageNum--;await render()}}
@@ -214,45 +247,95 @@ function renderBookmarks(){
  el.className="list";state.bookmarks.forEach((b,i)=>{const d=document.createElement("div");d.className="bm";d.innerHTML=`<button>🔖 ${b.label}</button><button>✕</button>`;d.children[0].onclick=async()=>{stopSpeech();pageNum=b.page;await render()};d.children[1].onclick=()=>{state.bookmarks.splice(i,1);storage.set(bookKey,state);renderBookmarks()};el.appendChild(d)})
 }
 
-async function readPage(){startReading(currentText,"No text found on this page.")}
-function startReading(text,emptyMsg){
- if(!text){$("speechStatus").textContent=emptyMsg||"No text to read.";return}
+// --- On-canvas word highlighting for the voice reader ---
+// Paints a moving highlight directly on the page's (invisible) word spans, synced to
+// speech via the browser's onboundary event, so you can see exactly where it's reading.
+// Highlighting always looks up spans fresh from the *current* pageWords array (by index
+// range) rather than holding onto span references, so it survives a re-render mid-read
+// (e.g. zooming in/out rebuilds the whole text layer with brand-new span elements).
+let activeRange=null, activeWordOffsets=[], highlightedSpans=[], lastHighlightIdx=-1;
+function clearHighlight(){highlightedSpans.forEach(s=>s.classList.remove("read-highlight","read-highlight-current"));highlightedSpans=[]}
+function highlightWordWindow(idx){
+ lastHighlightIdx=idx;
+ clearHighlight();
+ if(!activeRange)return;
+ const start=Math.max(0,idx-1);
+ const end=Math.min(activeWordOffsets.length,start+4);
+ for(let i=start;i<end;i++){
+  const w=pageWords[activeRange.start+i];
+  if(!w||!w.span)continue;
+  w.span.classList.add(i===idx?"read-highlight-current":"read-highlight");
+  highlightedSpans.push(w.span);
+ }
+ const cur=pageWords[activeRange.start+idx];
+ if(cur&&cur.span)cur.span.scrollIntoView({behavior:"smooth",block:"nearest",inline:"nearest"});
+}
+function splitSentences(text){
+ const out=[];const re=/[^.!?]+[.!?]+|[^.!?]+$/g;let m;
+ while((m=re.exec(text))){out.push({text:m[0],start:m.index})}
+ return out.length?out:[{text,start:0}];
+}
+
+async function readPage(){
+ startReadingRange(0,pageWords.length,"No text found on this page.");
+}
+function startReadingRange(rangeStart,rangeEnd,emptyMsg){
+ const words=pageWords.slice(rangeStart,rangeEnd);
+ if(!words.length){$("speechStatus").textContent=emptyMsg||"No text to read.";return}
  stopSpeech();
- speechQueue=text.match(/[^.!?]+[.!?]+|[^.!?]+$/g)||[text];
+ activeRange={start:rangeStart,end:rangeEnd};
+ const {text,words:withOffsets}=makeReadingSet(words);
+ activeWordOffsets=withOffsets.map(w=>({start:w.start,end:w.end}));
+ speechQueue=splitSentences(text);
  speechIndex=0;speaking=true;
  useFallbackTTS()?speakNextFallback():speakNext();
 }
 function speakNextFallback(){
- if(!speaking||speechIndex>=speechQueue.length){speaking=false;$("speechStatus").textContent="Finished";return}
- const text=speechQueue[speechIndex++].trim();if(!text)return speakNextFallback();
+ if(!speaking||speechIndex>=speechQueue.length){speaking=false;$("speechStatus").textContent="Finished";clearHighlight();return}
+ const sentenceText=speechQueue[speechIndex++].text.trim();if(!sentenceText)return speakNextFallback();
  $("speechStatus").textContent=`🔊 Reading sentence ${speechIndex}/${speechQueue.length} (offline voice)`;
+ // The offline engine gives no word-timing, so highlighting isn't available in this mode.
  const wpm=Math.max(80,Math.min(400,Math.round(175*parseFloat($("rate").value||"1"))));
- window.meSpeak.speak(text,{speed:wpm},()=>{if(speaking)speakNextFallback()});
+ window.meSpeak.speak(sentenceText,{speed:wpm},()=>{if(speaking)speakNextFallback()});
 }
 function speakNext(){
- if(!speaking||speechIndex>=speechQueue.length){speaking=false;$("speechStatus").textContent="Finished";return}
- const text=speechQueue[speechIndex++].trim();if(!text)return speakNext();
- const u=new SpeechSynthesisUtterance(text),v=voices[parseInt($("voiceSelect").value||"0")];
+ if(!speaking||speechIndex>=speechQueue.length){speaking=false;$("speechStatus").textContent="Finished";clearHighlight();return}
+ const sentence=speechQueue[speechIndex++];
+ const leadTrim=sentence.text.length-sentence.text.trimStart().length;
+ const sentenceText=sentence.text.trim();
+ if(!sentenceText)return speakNext();
+ const u=new SpeechSynthesisUtterance(sentenceText),v=voices[parseInt($("voiceSelect").value||"0")];
  if(v){u.voice=v;u.lang=v.lang}u.rate=parseFloat($("rate").value);
  u.onstart=()=>{$("speechStatus").textContent=`🔊 Reading sentence ${speechIndex}/${speechQueue.length}`};
- u.onend=speakNext;u.onerror=()=>{speaking=false;$("speechStatus").textContent="Speech error"};
+ u.onboundary=e=>{
+  const absIdx=sentence.start+leadTrim+e.charIndex;
+  const idx=activeWordOffsets.findIndex(w=>absIdx>=w.start&&absIdx<w.end);
+  if(idx>=0)highlightWordWindow(idx);
+ };
+ u.onend=speakNext;u.onerror=()=>{speaking=false;$("speechStatus").textContent="Speech error";clearHighlight()};
  speechSynthesis.speak(u);
 }
 $("readPage").onclick=readPage;
 $("readSelection").onclick=()=>{
- const text=(window.getSelection()?.toString()||"").trim();
- startReading(text,"Select some text on the page first.");
+ const sel=window.getSelection();
+ if(!sel||sel.isCollapsed||sel.rangeCount===0){startReadingRange(0,0,"Select some text on the page first.");return}
+ const range=sel.getRangeAt(0);
+ const indices=[];
+ pageWords.forEach((w,i)=>{if(range.intersectsNode(w.span))indices.push(i)});
+ if(!indices.length){startReadingRange(0,0,"Select some text on the page first.");return}
+ startReadingRange(indices[0],indices[indices.length-1]+1,"Select some text on the page first.");
 };
 document.addEventListener("selectionchange",updateSelectionButton);
 function updateSelectionButton(){
  const sel=window.getSelection();
- const text=(sel&&sel.toString().trim())||"";
- const inPage=sel&&sel.anchorNode&&$("pageContainer").contains(sel.anchorNode);
  const btn=$("readSelection");
- if(text&&inPage){
+ const inPage=sel&&sel.rangeCount>0&&!sel.isCollapsed&&sel.anchorNode&&$("pageContainer").contains(sel.anchorNode);
+ if(!inPage){btn.disabled=true;btn.textContent="▶ Read selection";return}
+ const range=sel.getRangeAt(0);
+ const count=pageWords.reduce((n,w)=>n+(range.intersectsNode(w.span)?1:0),0);
+ if(count>0){
   btn.disabled=false;
-  const words=text.split(/\s+/).length;
-  btn.textContent=`▶ Read selection (${words} word${words===1?"":"s"})`;
+  btn.textContent=`▶ Read selection (${count} word${count===1?"":"s"})`;
  }else{
   btn.disabled=true;
   btn.textContent="▶ Read selection";
@@ -263,7 +346,7 @@ $("pause").onclick=()=>{
  speechSynthesis.paused?speechSynthesis.resume():speechSynthesis.pause();
 };
 $("stop").onclick=stopSpeech;
-function stopSpeech(){speaking=false;speechQueue=[];speechIndex=0;speechSynthesis.cancel();if(window.meSpeak)window.meSpeak.stop();$("speechStatus").textContent="Ready"}
+function stopSpeech(){speaking=false;speechQueue=[];speechIndex=0;speechSynthesis.cancel();if(window.meSpeak)window.meSpeak.stop();$("speechStatus").textContent="Ready";clearHighlight();activeRange=null;activeWordOffsets=[];lastHighlightIdx=-1}
 
 $("searchBtn").onclick=()=>$("searchPanel").classList.toggle("hidden");
 let searchResults=[],searchIndex=0;
