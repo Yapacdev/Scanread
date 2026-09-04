@@ -206,7 +206,7 @@ function buildTextLayer(textContent,viewport,container){
    const w=measureCtx.measureText(tok).width;
    if(/\S/.test(tok)){
     const span=document.createElement("span");
-    span.textContent=tok;
+    span.textContent = tok.endsWith("-") ? tok : tok + " ";
     span.style.left=(tx[4]+advance*cos)+"px";
     span.style.top=((tx[5]-fontSize)+advance*sin)+"px";
     span.style.fontSize=fontSize+"px";
